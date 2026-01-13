@@ -3,75 +3,79 @@ import fitz
 import google.generativeai as genai
 import time
 
-st.set_page_config(page_title="논문 전체 번역기 (최종 수정본)", layout="wide")
-st.title("📄 Gemini 무료 논문 번역기 (404 오류 해결 버전)")
+st.set_page_config(page_title="논문 전체 번역기 (완주 버전)", layout="wide")
+st.title("📄 끝까지 번역하는 논문 번역기")
 
-api_key = st.sidebar.text_input("Google Gemini API Key를 입력하세요", type="password")
-uploaded_file = st.file_uploader("번역할 PDF 파일을 업로드하세요", type="pdf")
+# 세션 상태 초기화 (중간에 초기화되는 것을 방지)
+if 'full_text' not in st.session_state:
+    st.session_state.full_text = ""
+if 'is_translating' not in st.session_state:
+    st.session_state.is_translating = False
+
+api_key = st.sidebar.text_input("Google Gemini API Key", type="password")
+uploaded_file = st.file_uploader("PDF 파일을 업로드하세요", type="pdf")
 
 if uploaded_file and api_key:
-    try:
-        genai.configure(api_key=api_key)
-        
-        # [수정 포인트] 사용 가능한 모델을 찾아서 리스트에 저장
-        available_models = []
+    genai.configure(api_key=api_key)
+    
+    # 작동하는 모델 찾기
+    @st.cache_resource
+    def load_model(key):
         for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name)
-        
-        # 가장 적절한 모델 선택 (1.5-flash -> 1.5-pro -> 첫 번째 모델 순)
-        target_model = ""
-        for name in available_models:
-            if "1.5-flash" in name:
-                target_model = name
-                break
-        if not target_model and available_models:
-            target_model = available_models[0]
+            if 'generateContent' in m.supported_generation_methods and '1.5-flash' in m.name:
+                return m.name
+        return "models/gemini-1.5-flash"
 
-        if target_model:
-            st.info(f"선택된 모델: {target_model}")
-            model = genai.GenerativeModel(model_name=target_model)
-        else:
-            st.error("사용 가능한 모델을 찾을 수 없습니다. API 키 권한을 확인해주세요.")
+    target_model = load_model(api_key)
+    model = genai.GenerativeModel(target_model)
+
+    if st.button("번역 시작"):
+        st.session_state.is_translating = True
+        st.session_state.full_text = "" # 새로 시작할 때 초기화
         
-        if st.button("번역 시작") and target_model:
-            with st.spinner("중단 없이 전체 내용을 번역 중입니다..."):
-                pdf_data = uploaded_file.read()
-                doc = fitz.open(stream=pdf_data, filetype="pdf")
-                final_output = ""
+        pdf_data = uploaded_file.read()
+        doc = fitz.open(stream=pdf_data, filetype="pdf")
+        total_pages = len(doc)
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        result_area = st.empty() # 실시간으로 번역 내용을 보여줄 공간
+
+        for page_num, page in enumerate(doc):
+            blocks = page.get_text("blocks")
+            for block in blocks:
+                original = block[4].strip()
+                if len(original) < 30: continue
                 
-                progress_bar = st.progress(0)
-                total_pages = len(doc)
-
-                for page_num, page in enumerate(doc):
-                    text_blocks = page.get_text("blocks")
-                    for block in text_blocks:
-                        original_text = block[4].strip()
-                        if len(original_text) < 20: continue
-                        
-                        try:
-                            # 프롬프트: 원문 유지 및 번역 지시
-                            prompt = f"Please provide the following text in both English and Korean. \nFormat: [English Paragraph] \n\n[Korean Translation] \n\nDo not summarize. Translate everything.\n\nText: {original_text}"
-                            
-                            response = model.generate_content(prompt)
-                            
-                            if response.text:
-                                final_output += f"{response.text}\n\n---\n\n"
-                                # 무료 티어 안전을 위해 2초 대기
-                                time.sleep(2.0) 
-                        except Exception as e:
-                            # 429(속도제한) 발생 시 대기 후 재시도
-                            if "429" in str(e):
-                                time.sleep(10)
-                                continue
-                            st.warning(f"문단 오류 건너뜀: {e}")
-                            continue
+                try:
+                    prompt = f"Translate the following into Korean. Provide English first, then Korean translation. No summaries.\n\n[English]\n{original}"
+                    response = model.generate_content(prompt)
                     
-                    progress_bar.progress((page_num + 1) / total_pages)
+                    # 결과를 세션에 계속 누적
+                    translated = response.text
+                    st.session_state.full_text += f"{translated}\n\n---\n\n"
+                    
+                    # 실시간으로 화면에 업데이트 (사용자가 멈춘 게 아니라는 걸 알게 함)
+                    result_area.text_area("실시간 번역 진행 상황", value=st.session_state.full_text, height=300)
+                    
+                    time.sleep(1.5) # 속도 제한 방지
+                except Exception as e:
+                    if "429" in str(e):
+                        status_text.warning("속도 제한 발생! 10초간 대기합니다...")
+                        time.sleep(10)
+                    continue
+            
+            progress_bar.progress((page_num + 1) / total_pages)
+            status_text.info(f"현재 {page_num + 1} / {total_pages} 페이지 완료")
 
-                if final_output:
-                    st.success("번역 완료!")
-                    st.text_area("결과물", value=final_output, height=500)
-                    st.download_button("결과물 다운로드(.txt)", data=final_output, file_name="translated_full.txt")
-    except Exception as e:
-        st.error(f"초기화 실패: {e}")
+        st.session_state.is_translating = False
+        st.success("🎉 모든 번역이 완료되었습니다!")
+
+    # 번역이 완료되었거나 진행 중일 때 다운로드 버튼 항상 표시
+    if st.session_state.full_text:
+        st.download_button(
+            label="지금까지 번역된 결과 다운로드",
+            data=st.session_state.full_text,
+            file_name="translated_full_paper.txt",
+            mime="text/plain"
+        )
