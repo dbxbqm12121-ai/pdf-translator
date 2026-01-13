@@ -1,19 +1,22 @@
 import streamlit as st
 import fitz
-from openai import OpenAI
-import time # 시간 지연을 위해 추가
+import google.generativeai as genai
+import time
 
-st.set_page_config(page_title="논문 전체 번역기", layout="wide")
-st.title("📄 논문 전체 번역 (영문+한글 대조)")
+st.set_page_config(page_title="논문 전체 번역기 (무료 버전)", layout="wide")
+st.title("📄 Gemini 무료 논문 번역기 (영문+한글 대조)")
 
-api_key = st.sidebar.text_input("OpenAI API Key를 입력하세요", type="password")
+# Gemini API 키 입력
+api_key = st.sidebar.text_input("Google Gemini API Key를 입력하세요", type="password")
+
 uploaded_file = st.file_uploader("번역할 PDF 파일을 업로드하세요", type="pdf")
 
 if uploaded_file and api_key:
-    client = OpenAI(api_key=api_key)
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-1.5-flash') # 무료이면서 빠른 모델
     
-    if st.button("번역 시작 (전체 내용 출력)"):
-        with st.spinner("논문을 분석하고 번역 중입니다..."):
+    if st.button("번역 시작"):
+        with st.spinner("Gemini가 번역 중입니다..."):
             pdf_data = uploaded_file.read()
             doc = fitz.open(stream=pdf_data, filetype="pdf")
             final_output = ""
@@ -28,15 +31,12 @@ if uploaded_file and api_key:
                     if len(original_text) < 20: continue
                     
                     try:
-                        # 모델을 gpt-4o-mini로 변경하여 안정성 확보
-                        response = client.chat.completions.create(
-                            model="gpt-4o-mini", 
-                            messages=[{"role": "system", "content": "You are a professional translator. Provide English text and Korean translation paragraph by paragraph. Never summarize."},
-                                      {"role": "user", "content": original_text}]
-                        )
-                        translated_text = response.choices[0].message.content
-                        final_output += f"{translated_text}\n\n---\n\n"
-                        time.sleep(0.5) # API 과부하 방지를 위한 0.5초 휴식
+                        # Gemini에게 번역 요청
+                        prompt = f"Translate the following text into Korean. Keep the original English paragraph first, then the Korean translation. Do not summarize.\n\n{original_text}"
+                        response = model.generate_content(prompt)
+                        
+                        final_output += f"{response.text}\n\n---\n\n"
+                        time.sleep(1) # 무료 티어 속도 제한(RPM) 준수
                     except Exception as e:
                         st.error(f"오류 발생: {e}")
                         break
@@ -45,4 +45,4 @@ if uploaded_file and api_key:
 
             st.success("번역 완료!")
             st.text_area("결과물", value=final_output, height=500)
-            st.download_button("결과 파일 다운로드", data=final_output, file_name="translated.txt")
+            st.download_button("결과 파일 다운로드", data=final_output, file_name="translated_gemini.txt")
